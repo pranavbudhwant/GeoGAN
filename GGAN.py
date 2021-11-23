@@ -3,7 +3,13 @@
 Created on Wed Feb 27 15:49:14 2019
 
 @author: prnvb
+
 """
+
+import os
+
+os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID";
+os.environ["CUDA_VISIBLE_DEVICES"]="0";
 
 from typing import Tuple
 import keras
@@ -18,9 +24,13 @@ import numpy as np
 from keras.optimizers import Adam
 import tensorflow as tf
 from keras import backend as K
-import os
+
+
 from tqdm import tqdm
 from keras.losses import mean_absolute_error, binary_crossentropy
+
+K.clear_session()
+
 
 def generator(in_shape: Tuple[int,int,int], out_shape: Tuple[int,int,int], filters: int):
     
@@ -103,11 +113,70 @@ def discriminator_on_generator_loss(y_true, y_pred): #Binary Crossentropy
     return K.mean(K.binary_crossentropy(K.flatten(y_pred), K.flatten(y_true)), axis = -1) 
     #return K.mean(K.binary_crossentropy(K.flatten(y_pred), K.ones_like(K.flatten(y_pred))), axis=-1)
 
-def train(epochs, batch_size):
+
+
+cgan_optimizer = Adam(lr=1E-3, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
+gen_optimizer = keras.optimizers.Adam(lr=0.0002, beta_1=0.5, beta_2=0.999) 
+loss_weights = [10, 1]
+disc_optimizer = Adam(lr=1E-3, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
+
+gen_model = generator((512, 512, 7), (512, 512, 3), 64)
+disc_model = discriminator((512, 512, 7), (512, 512, 3), 64)
+cgan_model = cGAN_Model(gen_model, disc_model)
+
+print("Generator Summary")
+gen_model.summary()
+
+print("Discriminator Summary")
+disc_model.summary()
+
+print("Complete Model Summary")
+cgan_model.summary()
+
+gen_model.compile(loss = 'mae', optimizer = gen_optimizer)
+disc_model.compile(loss = 'binary_crossentropy', optimizer = disc_optimizer)
+cgan_model.compile(loss = [mean_absolute_error, binary_crossentropy], loss_weights = loss_weights, optimizer = cgan_optimizer)
+
+print(cgan_model.metrics)
+
+#Data Preprocessing:
+X_train_B = np.load('/home/research_centre_gpu/prnv/GeoGAN/Data/NoFlip/X16_11Norm_Train_Full.npy')
+X_train_A = np.load('/home/research_centre_gpu/prnv/GeoGAN/Data/NoFlip/Y16_11Norm_Train_Full.npy')
+
+#Train function : 
+# 1. Generate images 
+# 2. Train Discriminator as per Conditional GANs 
+# 3. discriminator.trainable = False
+# 4. Train DCGAN model 
+
+
+
+def train(epochs, batch_size , l , eps):
+
+    print("Total eps to be achieved: ",(epochs+eps))
+
+    d_loss = []
+    d_loss_real = []
+    d_loss_fake = []
+    dc_gan_loss = []
+    dc = 0 
+    d_l = 0
     Y_fake = np.zeros((batch_size,32,32,1))
     Y_real = np.random.uniform(0.7, 1, (batch_size,32,32,1))
-        
+    
+    dloss = 0
+    dloss_real = 0
+    dloss_fake = 0
+    gan_loss = 0
+
+    if l:
+
+        gen_model.load_weights('Weights/' + str(eps) + '_epochs_gen.h5')
+        disc_model.load_weights('Weights/' + str(eps) + '_epochs_disc.h5')
+        print("Loaded at " , eps , " epochs")
+
     for num_epochs in range(epochs):
+        print(num_epochs)
         for num_batch in tqdm(range(int(X_train_B.shape[0]/batch_size))):
             
             X_before = X_train_B[num_batch*batch_size : (num_batch + 1 )*batch_size , : , : , :]            
@@ -125,75 +194,50 @@ def train(epochs, batch_size):
             
             dloss = (0.5 * np.add(dloss_real, dloss_fake))
             
-            print('\n\nD_Loss_real: ', dloss_real)
-            print('D_Loss_fake: ', dloss_fake)
-            print('D_Loss: ', dloss)
-            d_loss_real.append(dloss_real)
-            d_loss_fake.append(dloss_fake)
-            d_loss.append(dloss)
+            #print('\n\nD_Loss_real: ', dloss_real)
+            #print('D_Loss_fake: ', dloss_fake)
+            #print('D_Loss: ', dloss)
             
             disc_model.trainable = False
             
             for _ in range(2):
                 gan_loss = (cgan_model.train_on_batch([X_before, noise], [X_after, Y_real]))
-                print('GAN_Loss: ', gan_loss)
-                dc_gan_loss.append(gan_loss)
+                #print('GAN_Loss: ', gan_loss)
     
-        #Save weights of generator and discriminator 
-        #path_gen = os.path.join('D:/dev/GeoGAN/Weights', str(num_epochs)+'_epochs_gen.h5')
-        #path_disc = os.path.join('D:/dev/GeoGAN/Weights', str(num_epochs)+'_epochs_disc.h5')
-        #gen_model.save_weights(path_gen)
-        #disc_model.save_weights(path_disc) 
+        d_loss_real.append(dloss_real)
+        d_loss_fake.append(dloss_fake)
+        d_loss.append(dloss)
+        dc_gan_loss.append(gan_loss)
+
+        print('\n\nD_Loss_real: ', dloss_real)
+        print('D_Loss_fake: ', dloss_fake)
+        print('D_Loss: ', dloss)
+        print('GAN_Loss: ', gan_loss)
+
+        #Save weights of generator and discriminator
+        if num_epochs%20 == 0:
+            path_gen = os.path.join('Weights', str(num_epochs + eps)+'_epochs_gen.h5')
+            path_disc = os.path.join('Weights', str(num_epochs + eps)+'_epochs_disc.h5')
+            gen_model.save_weights(path_gen)
+            disc_model.save_weights(path_disc) 
+            print('Model Saved!')
+
+    d_loss_real = np.array(d_loss_real)
+    d_loss_fake = np.array(d_loss_fake)
+    d_loss = np.array(d_loss)
+    dc_gan_loss = np.array(dc_gan_loss)
+
+    np.save('loss/d_loss_real' + str(num_epochs+eps) + '.npy',d_loss_real)
+    np.save('loss/d_loss_fake'+ str(num_epochs+eps) +'.npy',d_loss_fake)
+    np.save('loss/d_loss'+ str(num_epochs+eps) +'.npy',d_loss)
+    np.save('loss/dc_gan_loss' + str(num_epochs+eps) +'.npy',dc_gan_loss)
 
 
-if __name__ == '__main__':
-    
-    cgan_optimizer = Adam(lr=1E-3, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
-    gen_optimizer = keras.optimizers.Adam(lr=0.0002, beta_1=0.5, beta_2=0.999) 
-    loss_weights = [10, 1]
-    disc_optimizer = Adam(lr=1E-3, beta_1=0.9, beta_2=0.999, epsilon=1e-08)
-    
-    gen_model = generator((512, 512, 7), (512, 512, 3), 64)
-    disc_model = discriminator((512, 512, 7), (512, 512, 3), 64)
-    cgan_model = cGAN_Model(gen_model, disc_model)
-    
-    print("Generator Summary")
-    gen_model.summary()
-    
-    print("Discriminator Summary")
-    disc_model.summary()
-    
-    print("Complete Model Summary")
-    cgan_model.summary()
-    
-    gen_model.compile(loss = 'mae', optimizer = gen_optimizer)
-    disc_model.compile(loss = 'binary_crossentropy', optimizer = disc_optimizer)
-    cgan_model.compile(loss = [mean_absolute_error, binary_crossentropy], loss_weights = loss_weights, optimizer = cgan_optimizer)
-    
-    print(cgan_model.metrics)
-    
-    #Data Preprocessing:
-    X_train_B = np.load('D:/dev/GeoGAN/DataSet/Data/Resized/npy/OR/Shuffled/X_train_01Norm.npy')
-    X_train_A = np.load('D:/dev/GeoGAN/DataSet/Data/Resized/npy/OR/Shuffled/Y_train_01Norm.npy')
-    
-    #Train function : 
-    # 1. Generate images 
-    # 2. Train Discriminator as per Conditional GANs 
-    # 3. discriminator.trainable = False
-    # 4. Train DCGAN model 
-    
-    d_loss = []
-    d_loss_real = []
-    d_loss_fake = []
-    dc_gan_loss = []
-    dc = 0 
-    d_l = 0
-    
-    train(2, 1)
-    
-    import matplotlib.pyplot as plt
-    plt.plot(d_loss_real, label='d_loss_real')
-    plt.plot(d_loss_fake, label='d_loss_fake')
-    plt.plot(d_loss, label='d_loss')
-    plt.plot(dc_gan_loss)
-    plt.show()
+train(61,8,True,360)
+
+#import matplotlib.pyplot as plt
+#plt.plot(d_loss_real, label='d_loss_real')
+#plt.plot(d_loss_fake, label='d_loss_fake')
+#plt.plot(d_loss, label='d_loss')
+#plt.plot(dc_gan_loss)
+#plt.show()
